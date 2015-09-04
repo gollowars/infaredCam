@@ -6,20 +6,20 @@ void ofApp::setup(){
     ofEnableSmoothing();
     
     ofSetFrameRate(60);
+    videoWidth =  640;
+    videoHeight = 480;
     
+    
+    setVideoSize();
     if(MOVIE_DEBUG_MODE){
         //movie
-        movie.loadMovie("video.mov");
+        movie.loadMovie("debugmov1.mov");
         movie.play();
     }else {
         //Setting of WebCam
         cam.setVerbose(true);
         cam.setDeviceID(USE_CAMERA_ID);
-        
-        videoWidth =  640*0.8;
-        float ratio = 1024.0/640.0;
-        videoHeight = 480*0.8;
-        cam.initGrabber(videoWidth, videoHeight);
+        cam.initGrabber(actVideoWidth, actVideoHeight);
     }
     
     //setup of gui
@@ -30,28 +30,39 @@ void ofApp::setup(){
     ofxGuiSetDefaultHeight(18);
     
     gui.setup();
-    gui.add(radius.setup("Radius", 7, 1, 50));
-    gui.add(area.setup("Area",1200,1,1500));
-    gui.add(mThreshold.setup("Threshold", 150, 0, 500));
-    gui.setPosition(guiMargin, guiMargin + videoHeight);
+    gui.add(minRadius.setup("MinRadius", 1, 10, 50));
+    gui.add(maxRadius.setup("MaxRadius", 100, 10, 500));
+    gui.add(minArea.setup("minArea",10,0,50));
+    gui.add(maxArea.setup("maxArea",5500,40,5500));
+    gui.add(mThreshold.setup("Threshold", 15, 0, 255));
+    gui.setPosition(guiMargin, guiMargin);
     
     
-    contourFinder.setMinAreaRadius(radius);
-    contourFinder.setMaxArea(area);
+    contourFinder.setMinAreaRadius(minRadius);
+    contourFinder.setMaxAreaRadius(maxRadius);
     contourFinder.setThreshold(mThreshold);
     // wait for half a frame before forgetting something
-    contourFinder.getTracker().setPersistence(1055);
+    contourFinder.getTracker().setPersistence(15);
     // an object can move up to 32 pixels per frame
     contourFinder.getTracker().setMaximumDistance(32);
     
     showLabels = true;
+    
+    
+    //指定したIPアドレスとポート番号でサーバーに接続
+    sender.setup( HOST, PORT );
 }
 
 //--------------------------------------------------------------
 void ofApp::update(){
-    contourFinder.setMinAreaRadius(radius);
-    contourFinder.setMaxArea(area);
+    contourFinder.setMinAreaRadius(minRadius);
+    contourFinder.setMaxAreaRadius(maxRadius);
+    contourFinder.setMinArea(minArea);
+    contourFinder.setMaxArea(maxArea);
     contourFinder.setThreshold(mThreshold);
+    
+    //ビデオのサイズ調整
+    setVideoSize();
     
     if(MOVIE_DEBUG_MODE){
         movie.update();
@@ -66,29 +77,63 @@ void ofApp::update(){
             contourFinder.findContours(cam);
         }
     }
-
+    
+    //当たり判定
+    if(showLabels){
+        //接しているか判定
+        float objRads[contourFinder.size()];
+        float objPosX[contourFinder.size()];
+        float objPosY[contourFinder.size()];
+        
+        for(int i = 0;i<contourFinder.size();i++){
+            cv::Rect targetRect = contourFinder.getBoundingRect(i);
+            float targetW = targetRect.width;
+            float targetH = targetRect.height;
+            float targetF = max(targetW,targetH);
+            objRads[i] = targetF;
+            objPosX[i] = contourFinder.getCenter(i).x;
+            objPosY[i] = contourFinder.getCenter(i).y;
+        }
+        
+        for(int i = 0;i < contourFinder.size();i++){
+            for (int n = i+1; n<contourFinder.size(); n++) {
+                if(objRads[n]){
+                    float distance = ofDist(objPosX[i], objPosY[i], objPosX[n], objPosY[n]);
+                    if(objRads[i] + objRads[n] + collisionDist > distance){
+                        std::cout << "Collision!!" << endl;
+                        std::cout << distance << endl;
+                        
+                        
+                        //OSCメッセージの準備
+                        ofxOscMessage m;
+                        //OSCアドレスの指定
+                        m.setAddress( "/collision/flag" );
+                        m.addIntArg(0);
+                        //メッセージを送信
+                        sender.sendMessage( m );
+                        
+                    }
+                }
+            }
+        }
+            
+    }
 }
 
 //--------------------------------------------------------------
 void ofApp::draw(){
     ofSetBackgroundAuto(showLabels);
+    
     ofxCv::RectTracker& tracker = contourFinder.getTracker();
 
-    ofSetColor(120, 120, 120);
-    ofRect(0,0,videoWidth,videoHeight);
     
     if(showLabels){
         ofSetColor(255, 255, 255);
         
-        int x,y;
         if(MOVIE_DEBUG_MODE){
-            x = (int)(ofGetWidth()/2 - movie.width/2);
-            y = (int)(ofGetHeight()/2 - movie.height/2);
-            movie.draw(x,y);
+            movie.draw(0,0,actVideoWidth,actVideoHeight);
         }else {
-            x = (int)(ofGetWidth()/2 - cam.width/2);
-            y = (int)(ofGetHeight()/2 - cam.height/2);
-            cam.draw(videoWidth, 0);
+            cam.draw(0, 0,actVideoWidth,actVideoHeight);
         }
 
 
@@ -154,16 +199,20 @@ void ofApp::draw(){
         ofLine(j, 12, j, 16);
     }
     
-    
-    
+
     
     
     gui.draw();
-    ofDrawBitmapString(ofToString(ofGetFrameRate())+"fps", 10, videoHeight - 15);
+    ofDrawBitmapString(ofToString(ofGetFrameRate())+"fps", 10, ofGetHeight() - 15);
 }
 
 //--------------------------------------------------------------
+// EVENT
+//--------------------------------------------------------------
 void ofApp::keyPressed(int key){
+    //フルスクリーンモードの切り替え
+    switchFullScreenMode(key);
+    
     if(key == ' ') {
         showLabels = !showLabels;
     }
@@ -175,37 +224,37 @@ void ofApp::keyReleased(int key){
 
 }
 
-//--------------------------------------------------------------
-void ofApp::mouseMoved(int x, int y ){
-
+void ofApp::switchFullScreenMode(int key){
+    //もしキー入力が[f]だったら
+    if (key == 'f')
+    {
+        //フルスクリーン on/off の切り替え
+        ofToggleFullscreen();
+    }
 }
 
-//--------------------------------------------------------------
-void ofApp::mouseDragged(int x, int y, int button){
-
-}
 
 //--------------------------------------------------------------
-void ofApp::mousePressed(int x, int y, int button){
-
-}
-
+// Application
 //--------------------------------------------------------------
-void ofApp::mouseReleased(int x, int y, int button){
+void ofApp::setVideoSize() {
+    float winW = ofGetWidth();
+    float winH = ofGetHeight();
+    
+    float ratioW = winW/videoWidth;
+    float ratioH = winH/videoHeight;
+    
+    float videoRatio = std::max(ratioW, ratioH);
 
-}
-
-//--------------------------------------------------------------
-void ofApp::windowResized(int w, int h){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::gotMessage(ofMessage msg){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::dragEvent(ofDragInfo dragInfo){ 
-
+    float tempRatioW = videoWidth*videoRatio;
+    float tempRatioH = videoHeight*videoRatio;
+    
+    if(actVideoWidth != videoWidth*videoRatio){
+        actVideoWidth = videoWidth*videoRatio;
+    }
+    
+    if(actVideoHeight != videoHeight*videoRatio){
+        actVideoHeight = videoHeight*videoRatio;
+    }
+    
 }
